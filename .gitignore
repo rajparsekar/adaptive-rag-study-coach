@@ -1,0 +1,16 @@
+# Python environment
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Keep API keys and secrets out of GitHub
+.streamlit/secrets.toml
+.env
+.env.*
+
+# Editor and operating system files
+.vscode/
+.DS_Store
