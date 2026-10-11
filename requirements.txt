@@ -4,3 +4,4 @@ faiss-cpu
 numpy
 sentence-transformers
 google-genai
+supabase

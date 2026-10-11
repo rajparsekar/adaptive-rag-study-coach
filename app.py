@@ -1,5 +1,6 @@
 import streamlit as st
 
+from src.supabase_client import get_supabase_client
 from src.pdf_processor import extract_text_from_pdf, split_text
 from src.embeddings import load_embedding_model, create_embeddings
 from src.retriever import create_faiss_index, search_faiss
@@ -10,12 +11,127 @@ from src.gemini_client import (
     generate_adaptive_question,
 )
 
-
 st.set_page_config(
     page_title="Adaptive RAG Study Coach",
     page_icon="📚",
-    layout="wide"
+    layout="wide",
 )
+
+
+# --------------------------------------------------
+# SUPABASE CONNECTION AND USER AUTHENTICATION
+# --------------------------------------------------
+
+if "supabase_client" not in st.session_state:
+    st.session_state["supabase_client"] = get_supabase_client()
+
+if "supabase_user" not in st.session_state:
+    st.session_state["supabase_user"] = None
+
+supabase = st.session_state["supabase_client"]
+
+if st.session_state["supabase_user"] is None:
+    st.title("Adaptive RAG Study Coach")
+    st.write("Log in or create an account to continue.")
+
+    login_tab, signup_tab = st.tabs(["Log In", "Create Account"])
+
+    # LOGIN
+    with login_tab:
+        with st.form("login_form"):
+            login_email = st.text_input("Email", key="login_email")
+            login_password = st.text_input(
+                "Password",
+                type="password",
+                key="login_password",
+            )
+            login_button = st.form_submit_button("Log In")
+
+        if login_button:
+            if not login_email.strip() or not login_password:
+                st.warning("Enter your email and password.")
+            else:
+                try:
+                    response = supabase.auth.sign_in_with_password(
+                        {
+                            "email": login_email.strip(),
+                            "password": login_password,
+                        }
+                    )
+
+                    st.session_state["supabase_user"] = {
+                        "id": response.user.id,
+                        "email": response.user.email,
+                    }
+
+                    st.rerun()
+
+                except Exception as error:
+                    st.error(f"Login failed: {error}")
+
+    # SIGN UP
+    with signup_tab:
+        with st.form("signup_form"):
+            signup_email = st.text_input(
+                "Email",
+                key="signup_email",
+            )
+            signup_password = st.text_input(
+                "Password",
+                type="password",
+                key="signup_password",
+            )
+            signup_button = st.form_submit_button("Create Account")
+
+        if signup_button:
+            if not signup_email.strip() or not signup_password:
+                st.warning("Enter your email and password.")
+            else:
+                try:
+                    response = supabase.auth.sign_up(
+                        {
+                            "email": signup_email.strip(),
+                            "password": signup_password,
+                        }
+                    )
+
+                    if response.session is not None and response.user is not None:
+                        st.session_state["supabase_user"] = {
+                            "id": response.user.id,
+                            "email": response.user.email,
+                        }
+                        st.rerun()
+                    else:
+                        st.success(
+                            "Account created. Check your email for a "
+                            "confirmation link, then log in."
+                        )
+
+                except Exception as error:
+                    st.error(f"Sign-up failed: {error}")
+
+    st.stop()
+
+
+# LOGOUT
+st.sidebar.caption(
+    f"Logged in as: {st.session_state['supabase_user']['email']}"
+)
+
+if st.sidebar.button("Log Out"):
+    try:
+        supabase.auth.sign_out()
+    except Exception:
+        pass
+
+    st.session_state["supabase_user"] = None
+    st.session_state["supabase_client"] = get_supabase_client()
+    st.rerun()
+
+
+# --------------------------------------------------
+# INITIALIZE MODELS
+# --------------------------------------------------
 
 st.title("Adaptive RAG Study Coach")
 st.write(
@@ -31,12 +147,13 @@ def get_embedding_model():
 
 @st.cache_resource
 def get_gemini_client():
-    return load_gemini_client(
-        st.secrets["GEMINI_API_KEY"]
-    )
+    return load_gemini_client(st.secrets["GEMINI_API_KEY"])
 
 
-# Initialize session data
+# --------------------------------------------------
+# INITIALIZE SESSION DATA
+# --------------------------------------------------
+
 defaults = {
     "chunks": [],
     "index": None,
@@ -63,45 +180,30 @@ st.header("1. Study Materials")
 uploaded_files = st.file_uploader(
     "Upload one or more academic PDFs",
     type=["pdf"],
-    accept_multiple_files=True
+    accept_multiple_files=True,
 )
 
 if st.button("Process / Re-index Documents", type="primary"):
-
     if not uploaded_files:
         st.warning("Please upload at least one PDF.")
-
     else:
         all_chunks = []
 
         try:
             with st.spinner("Reading and indexing documents..."):
-
                 for uploaded_file in uploaded_files:
                     uploaded_file.seek(0)
 
                     pages = extract_text_from_pdf(uploaded_file)
-
-                    file_chunks = split_text(
-                        pages,
-                        uploaded_file.name
-                    )
-
+                    file_chunks = split_text(pages, uploaded_file.name)
                     all_chunks.extend(file_chunks)
 
                 if not all_chunks:
-                    st.error(
-                        "No readable text was found in the PDFs."
-                    )
-
+                    st.error("No readable text was found in the PDFs.")
                 else:
                     model = get_embedding_model()
 
-                    embeddings = create_embeddings(
-                        model,
-                        all_chunks
-                    )
-
+                    embeddings = create_embeddings(model, all_chunks)
                     index = create_faiss_index(embeddings)
 
                     st.session_state["chunks"] = all_chunks
@@ -128,7 +230,6 @@ if st.button("Process / Re-index Documents", type="primary"):
 
 
 if st.session_state["index"] is not None:
-
     with st.expander("View Indexed Documents"):
         for filename in st.session_state["processed_files"]:
             st.write(f"• {filename}")
@@ -139,48 +240,37 @@ if st.session_state["index"] is not None:
 # --------------------------------------------------
 
 if st.session_state["index"] is not None:
-
     st.divider()
     st.header("2. Ask Your Study Material")
 
     with st.form("question_form"):
-
-        question_input = st.text_input(
-            "Enter your question:"
-        )
-
+        question_input = st.text_input("Enter your question:")
         ask_button = st.form_submit_button("Ask Question")
 
     if ask_button:
-
         if not question_input.strip():
             st.warning("Please enter a question.")
-
         else:
             try:
                 model = get_embedding_model()
 
                 with st.spinner("Finding relevant study material..."):
-
                     retrieved_chunks = search_faiss(
                         index=st.session_state["index"],
                         model=model,
                         chunks=st.session_state["chunks"],
                         query=question_input.strip(),
-                        top_k=3
+                        top_k=3,
                     )
 
                 with st.spinner("Generating answer..."):
-
                     answer = generate_answer(
                         get_gemini_client(),
                         question_input.strip(),
-                        retrieved_chunks
+                        retrieved_chunks,
                     )
 
-                st.session_state["current_question"] = (
-                    question_input.strip()
-                )
+                st.session_state["current_question"] = question_input.strip()
                 st.session_state["retrieved_chunks"] = retrieved_chunks
                 st.session_state["current_answer"] = answer
                 st.session_state["evaluation"] = None
@@ -195,31 +285,21 @@ if st.session_state["index"] is not None:
 # --------------------------------------------------
 
 if st.session_state["current_answer"]:
-
     st.divider()
     st.header("3. AI Answer")
 
     st.write("**Question:**")
     st.write(st.session_state["current_question"])
-
     st.write(st.session_state["current_answer"])
 
     st.subheader("Sources Used")
 
-    for i, chunk in enumerate(
-        st.session_state["retrieved_chunks"]
-    ):
-
+    for i, chunk in enumerate(st.session_state["retrieved_chunks"]):
         with st.expander(
-            f"Source {i + 1}: {chunk['source']} "
-            f"— Page {chunk['page']}"
+            f"Source {i + 1}: {chunk['source']} — Page {chunk['page']}"
         ):
-
             st.write(chunk["text"])
-
-            st.caption(
-                f"Similarity score: {chunk['score']:.3f}"
-            )
+            st.caption(f"Similarity score: {chunk['score']:.3f}")
 
 
 # --------------------------------------------------
@@ -227,7 +307,6 @@ if st.session_state["current_answer"]:
 # --------------------------------------------------
 
 if st.session_state["current_answer"]:
-
     st.divider()
     st.header("4. Check Your Answer")
 
@@ -236,55 +315,47 @@ if st.session_state["current_answer"]:
         "The system will compare it with your study material."
     )
 
-    question_key = str(
-        abs(hash(st.session_state["current_question"]))
-    )
+    question_key = str(abs(hash(st.session_state["current_question"])))
 
     with st.form("evaluation_form"):
-
         student_answer = st.text_area(
             "Your answer:",
             height=150,
-            key=f"student_answer_{question_key}"
+            key=f"student_answer_{question_key}",
         )
 
-        evaluate_button = st.form_submit_button(
-            "Evaluate My Answer"
-        )
+        evaluate_button = st.form_submit_button("Evaluate My Answer")
 
     if evaluate_button:
-
         if not student_answer.strip():
             st.warning("Please write an answer first.")
-
         else:
             try:
                 with st.spinner("Checking your answer..."):
-
                     evaluation = evaluate_student_answer(
                         get_gemini_client(),
                         st.session_state["current_question"],
                         student_answer.strip(),
-                        st.session_state["retrieved_chunks"]
+                        st.session_state["retrieved_chunks"],
                     )
 
                 st.session_state["evaluation"] = evaluation
 
-                # Record a successfully scored answer once
                 if evaluation.get("score") is not None:
-
-                    st.session_state["evaluation_history"].append({
-                        "question": st.session_state["current_question"],
-                        "answer": student_answer.strip(),
-                        "score": evaluation["score"],
-                        "weak_concepts": evaluation.get(
-                            "weak_concepts", []
-                        ),
-                        "missing_points": evaluation.get(
-                            "missing_points", []
-                        ),
-                        "feedback": evaluation.get("feedback", ""),
-                    })
+                    st.session_state["evaluation_history"].append(
+                        {
+                            "question": st.session_state["current_question"],
+                            "answer": student_answer.strip(),
+                            "score": evaluation["score"],
+                            "weak_concepts": evaluation.get(
+                                "weak_concepts", []
+                            ),
+                            "missing_points": evaluation.get(
+                                "missing_points", []
+                            ),
+                            "feedback": evaluation.get("feedback", ""),
+                        }
+                    )
 
             except Exception as error:
                 st.error(f"Evaluation failed: {error}")
@@ -297,7 +368,6 @@ if st.session_state["current_answer"]:
 evaluation = st.session_state["evaluation"]
 
 if evaluation is not None:
-
     st.divider()
     st.header("5. Evaluation Results")
 
@@ -306,13 +376,8 @@ if evaluation is not None:
     if score is not None:
         st.metric("Final Score", f"{score}/10")
 
-        criteria_scores = evaluation.get(
-            "criteria_scores", {}
-        )
-
-        criteria_reasons = evaluation.get(
-            "criteria_reasons", {}
-        )
+        criteria_scores = evaluation.get("criteria_scores", {})
+        criteria_reasons = evaluation.get("criteria_reasons", {})
 
         criteria_info = [
             ("conceptual_correctness", "Concept correctness", 3),
@@ -325,13 +390,10 @@ if evaluation is not None:
         st.subheader("Where Your Marks Came From")
 
         for key, label, maximum in criteria_info:
-
             marks = criteria_scores.get(key, 0)
-
             st.write(f"**{label}: {marks}/{maximum}**")
 
             reason = criteria_reasons.get(key, "")
-
             if reason:
                 st.caption(reason)
 
@@ -342,7 +404,6 @@ if evaluation is not None:
     st.write(evaluation.get("feedback", ""))
 
     st.subheader("What You Got Right")
-
     correct_points = evaluation.get("correct_points", [])
 
     if correct_points:
@@ -352,7 +413,6 @@ if evaluation is not None:
         st.write("No specific correct points were identified.")
 
     st.subheader("What You Missed")
-
     missing_points = evaluation.get("missing_points", [])
 
     if missing_points:
@@ -362,7 +422,6 @@ if evaluation is not None:
         st.write("No missing points were identified.")
 
     st.subheader("Topics to Revise")
-
     weak_concepts = evaluation.get("weak_concepts", [])
 
     if weak_concepts:
@@ -377,7 +436,6 @@ if evaluation is not None:
 # --------------------------------------------------
 
 if evaluation is not None and evaluation.get("score") is not None:
-
     st.divider()
     st.header("6. Targeted Practice")
 
@@ -385,14 +443,10 @@ if evaluation is not None and evaluation.get("score") is not None:
     missing_points = evaluation.get("missing_points", [])
 
     if st.button("Generate Practice Question for My Weak Area"):
-
-        # Select a topic that needs improvement
         if weak_concepts:
             target_concept = weak_concepts[0]
-
         elif missing_points:
             target_concept = missing_points[0]
-
         else:
             target_concept = st.session_state["current_question"]
 
@@ -400,19 +454,18 @@ if evaluation is not None and evaluation.get("score") is not None:
             with st.spinner(
                 f"Preparing a question about {target_concept}..."
             ):
-
                 supporting_chunks = search_faiss(
                     index=st.session_state["index"],
                     model=get_embedding_model(),
                     chunks=st.session_state["chunks"],
                     query=target_concept,
-                    top_k=3
+                    top_k=3,
                 )
 
                 new_question = generate_adaptive_question(
                     get_gemini_client(),
                     target_concept,
-                    supporting_chunks
+                    supporting_chunks,
                 )
 
                 if new_question:
@@ -425,32 +478,29 @@ if evaluation is not None and evaluation.get("score") is not None:
 
 
 if st.session_state["adaptive_question"]:
-
     st.info(
         f"**Your targeted practice question:**\n\n"
         f"{st.session_state['adaptive_question']}"
     )
 
     if st.button("Practice This Question"):
-
         try:
             model = get_embedding_model()
             new_question = st.session_state["adaptive_question"]
 
             with st.spinner("Preparing your practice question..."):
-
                 retrieved_chunks = search_faiss(
                     index=st.session_state["index"],
                     model=model,
                     chunks=st.session_state["chunks"],
                     query=new_question,
-                    top_k=3
+                    top_k=3,
                 )
 
                 answer = generate_answer(
                     get_gemini_client(),
                     new_question,
-                    retrieved_chunks
+                    retrieved_chunks,
                 )
 
                 st.session_state["current_question"] = new_question
@@ -472,7 +522,6 @@ if st.session_state["adaptive_question"]:
 history = st.session_state["evaluation_history"]
 
 if history:
-
     st.divider()
     st.header("7. Learning History")
 
@@ -485,7 +534,6 @@ if history:
     average_score = sum(scores) / len(scores) if scores else 0
 
     col1, col2 = st.columns(2)
-
     col1.metric("Answers Evaluated", len(scores))
     col2.metric("Average Score", f"{average_score:.1f}/10")
 
@@ -494,7 +542,6 @@ if history:
 
     for item in history:
         for concept in item.get("weak_concepts", []):
-
             name = str(concept).strip()
 
             if name:
@@ -503,25 +550,24 @@ if history:
                 if key not in concept_counts:
                     concept_counts[key] = {
                         "Concept": name,
-                        "Times Flagged": 0
+                        "Times Flagged": 0,
                     }
 
                 concept_counts[key]["Times Flagged"] += 1
 
     if concept_counts:
-
         st.subheader("Frequently Flagged Concepts")
 
         ranked = sorted(
             concept_counts.values(),
             key=lambda item: item["Times Flagged"],
-            reverse=True
+            reverse=True,
         )
 
         st.dataframe(
             ranked,
             hide_index=True,
-            use_container_width=True
+            use_container_width=True,
         )
 
         st.caption(
@@ -532,11 +578,7 @@ if history:
     st.subheader("Previous Answers")
 
     for item in reversed(history):
-
-        with st.expander(
-            f"{item['question']} — {item['score']}/10"
-        ):
-
+        with st.expander(f"{item['question']} — {item['score']}/10"):
             st.write("**Your answer:**")
             st.write(item["answer"])
 
@@ -544,6 +586,5 @@ if history:
             st.write(item["feedback"])
 
             st.write("**Topics to revise:**")
-
             for concept in item.get("weak_concepts", []):
                 st.write(f"• {concept}")
